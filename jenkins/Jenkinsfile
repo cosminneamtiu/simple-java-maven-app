@@ -1,32 +1,35 @@
 pipeline {
-  agent {
-    docker {
-      image 'maven:3.9-eclipse-temurin-21'   // Maven + JDK 21
-      args  '-v $HOME/.m2:/root/.m2'         // cache dependencies between builds
-      reuseNode true
-    }
-  }
-
+  agent any
   options { timestamps() }
 
   stages {
     stage('Build') {
       steps {
-        sh 'java -version && mvn -v'
-        sh 'mvn -B -DskipTests clean package'
+        script {
+          def JAVA = tool name: 'JDK21',         type: 'hudson.model.JDK'
+          def MVN  = tool name: 'Maven 3.9.x',   type: 'hudson.tasks.Maven$MavenInstallation'
+          withEnv(["JAVA_HOME=${JAVA}", "PATH+JAVA=${JAVA}/bin", "PATH+MAVEN=${MVN}/bin"]) {
+            sh 'java -version && mvn -v'
+            sh 'mvn -B -DskipTests clean package'
+          }
+        }
       }
     }
 
     stage('Test') {
       steps {
-        sh 'mvn -B test'
+        script {
+          def JAVA = tool name: 'JDK21',         type: 'hudson.model.JDK'
+          def MVN  = tool name: 'Maven 3.9.x',   type: 'hudson.tasks.Maven$MavenInstallation'
+          withEnv(["JAVA_HOME=${JAVA}", "PATH+JAVA=${JAVA}/bin", "PATH+MAVEN=${MVN}/bin"]) {
+            sh 'mvn -B test'
+          }
+        }
       }
     }
 
     stage('Deliver') {
-      steps {
-        archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-      }
+      steps { archiveArtifacts artifacts: 'target/*.jar', fingerprint: true }
     }
 
     stage('Complete') {
