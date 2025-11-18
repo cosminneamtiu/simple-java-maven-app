@@ -1,30 +1,36 @@
 pipeline {
-    agent any
-    stages {
-        stage('Build') {
-            steps {
-                sh 'mvn -B -DskipTests clean package'
-            }
-        }
-        stage('Test') {
-            steps {
-                sh 'mvn test'
-            }
-            post {
-                always {
-                    junit 'target/surefire-reports/*.xml'
-                }
-            }
-        }
-        stage('Deliver') {
-            steps {
-                sh './jenkins/scripts/deliver.sh'
-            }
-        }
-        stage('Complete') {
-            steps {
-                echo 'Job Complete!'
-            }
-        }
+  agent {
+    docker {
+      image 'maven:3.9-eclipse-temurin-21'   // Maven + JDK 21
+      args  '-v $HOME/.m2:/root/.m2'         // cache dependencies between builds
+      reuseNode true
     }
+  }
+
+  options { timestamps() }
+
+  stages {
+    stage('Build') {
+      steps {
+        sh 'java -version && mvn -v'
+        sh 'mvn -B -DskipTests clean package'
+      }
+    }
+
+    stage('Test') {
+      steps {
+        sh 'mvn -B test'
+      }
+    }
+
+    stage('Deliver') {
+      steps {
+        archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+      }
+    }
+
+    stage('Complete') {
+      steps { echo '✅ Build pipeline finished.' }
+    }
+  }
 }
