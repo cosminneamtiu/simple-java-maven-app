@@ -1,39 +1,140 @@
+// Jenkinsfile — Self-healing JDK21 + Maven
 pipeline {
   agent any
   options { timestamps() }
 
   stages {
-    stage('Build') {
+    stage('Setup tools & verify (self-heal JDK & Maven)') {
       steps {
         script {
-          def JAVA = tool name: 'JDK21',         type: 'hudson.model.JDK'
-          def MVN  = tool name: 'Maven 3.9.x',   type: 'hudson.tasks.Maven$MavenInstallation'
-          withEnv(["JAVA_HOME=${JAVA}", "PATH+JAVA=${JAVA}/bin", "PATH+MAVEN=${MVN}/bin"]) {
-            sh 'java -version && mvn -v'
-            sh 'mvn -B -DskipTests clean package'
+          // --- Resolve tool homes by name (fallback for Maven naming) ---
+          def JDK_TOOL_HOME = tool name: 'JDK21', type: 'hudson.model.JDK'
+          def MAVEN_TOOL_HOME
+          try {
+            MAVEN_TOOL_HOME = tool name: 'Maven 3.9.x', type: 'hudson.tasks.Maven$MavenInstallation'
+          } catch (ignored) {
+            MAVEN_TOOL_HOME = tool name: 'Maven_3.9.x', type: 'hudson.tasks.Maven$MavenInstallation'
           }
+
+          // --- Self-heal JDK: if no bin/java anywhere under tool dir, download Temurin 21 and install ---
+          withEnv(["JDK_TOOL_HOME=${JDK_TOOL_HOME}"]) {
+            sh '''
+              set -euo pipefail
+              d="$JDK_TOOL_HOME"
+              echo "[info] JDK tool dir: $d"
+              if ! find "$d" -type f -path "*/bin/java" -print -quit >/dev/null 2>&1; then
+                echo "[warn] No JDK found under $d — installing Temurin 21..."
+                tmp="$(mktemp -d)"
+                cd "$tmp"
+                curl -fL --retry 5 --connect-timeout 20 -o jdk21.tar.gz \
+                  "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/adoptium"
+                tar -xzf jdk21.tar.gz
+                root="$(tar -tzf jdk21.tar.gz | head -1 | cut -d/ -f1)"
+                mkdir -p "$d"
+                rm -rf "$d"/*
+                # If archive has a top folder, move its contents in; else move all
+                if [ -d "$root" ]; then
+                  mv "$root"/* "$d"/
+                else
+                  tar -xzf jdk21.tar.gz -C "$d"
+                fi
+                cd /
+                rm -rf "$tmp"
+                echo "[ok] Temurin 21 installed under $d"
+              fi
+            '''
+          }
+
+          // --- Self-heal Maven: ensure mvn exists; if not, download Maven 3.9.11 into the tool dir ---
+          withEnv(["MAVEN_TOOL_HOME=${MAVEN_TOOL_HOME}"]) {
+            sh '''
+              set -euo pipefail
+              m="$MAVEN_TOOL_HOME"
+              echo "[info] Maven tool dir: $m"
+              if [ ! -x "$m/bin/mvn" ]; then
+                echo "[warn] No mvn at $m/bin/mvn — installing Apache Maven 3.9.11..."
+                tmp="$(mktemp -d)"
+                cd "$tmp"
+                curl -fL --retry 5 --connect-timeout 20 -o maven.tar.gz \
+                  "https://archive.apache.org/dist/maven/maven-3/3.9.11/binaries/apache-maven-3.9.11-bin.tar.gz"
+                tar -xzf maven.tar.gz
+                mkdir -p "$m"
+                rm -rf "$m"/*
+                mv apache-maven-3.9.11/* "$m"/
+                cd /
+                rm -rf "$tmp"
+                echo "[ok] Maven 3.9.11 installed under $m"
+              fi
+            '''
+          }
+
+          // --- Resolve actual JAVA_HOME in case JDK is nested (*/bin/java) and export PATHs ---
+          withEnv(["JDK_TOOL_HOME=${JDK_TOOL_HOME}"]) {
+            def RESOLVED_JAVA_HOME = sh(returnStdout: true, script: '''
+              set -e
+              d="$JDK_TOOL_HOME"
+              if [ -x "$d/bin/java" ]; then
+                echo "$d"
+              else
+                f="$(find "$d" -type f -path "*/bin/java" -print -quit || true)"
+                [ -n "$f" ] && dirname "$(dirname "$f")" || { echo "no-java"; exit 1; }
+              fi
+            ''').trim()
+
+            if (RESOLVED_JAVA_HOME == 'no-java') {
+              error('JAVA_HOME could not be resolved even after self-heal.')
+            }
+
+            env.JAVA_HOME = RESOLVED_JAVA_HOME
+            env.PATH = "${RESOLVED_JAVA_HOME}/bin:${MAVEN_TOOL_HOME}/bin:${env.PATH}"
+          }
+
+          // --- Sanity prints ---
+          sh '''
+            echo "[info] JAVA_HOME=$JAVA_HOME"
+            echo "[info] which java => $(which java)"
+            echo "[info] which mvn  => $(which mvn)"
+            java -version
+            mvn -v
+          '''
         }
+      }
+    }
+
+    stage('Cleanup') {
+      steps { deleteDir() } // or cleanWs() if plugin installed
+    }
+
+    stage('Checkout') {
+      steps {
+        // If using multibranch or withSCM this is handled automatically;
+        // otherwise uncomment to clone explicitly:
+        // sh 'git clone https://github.com/jenkins-docs/simple-java-maven-app.git'
+        echo 'SCM checkout done by Jenkins'
+      }
+    }
+
+    stage('Build') {
+      steps {
+        // For multibranch/withSCM use repo root; adjust path if needed
+        sh 'mvn -B -DskipTests clean package'
       }
     }
 
     stage('Test') {
       steps {
-        script {
-          def JAVA = tool name: 'JDK21',         type: 'hudson.model.JDK'
-          def MVN  = tool name: 'Maven 3.9.x',   type: 'hudson.tasks.Maven$MavenInstallation'
-          withEnv(["JAVA_HOME=${JAVA}", "PATH+JAVA=${JAVA}/bin", "PATH+MAVEN=${MVN}/bin"]) {
-            sh 'mvn -B test'
-          }
-        }
+        sh 'mvn -B test'
       }
     }
 
     stage('Deliver') {
-      steps { archiveArtifacts artifacts: 'target/*.jar', fingerprint: true }
+      steps {
+        archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+      }
     }
 
     stage('Complete') {
-      steps { echo '✅ Build pipeline finished.' }
+      steps { echo '✅ Pipeline finished.' }
     }
   }
 }
