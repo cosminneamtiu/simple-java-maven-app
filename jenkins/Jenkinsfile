@@ -1,9 +1,10 @@
-// Jenkinsfile — self-heal tools + auto-detect pom.xml
+// Jenkinsfile — self-heal tools + safe checkout + auto POM
 pipeline {
   agent any
   options { timestamps() }
 
   stages {
+
     stage('Setup tools & verify (self-heal JDK & Maven)') {
       steps {
         script {
@@ -15,7 +16,7 @@ pipeline {
             MAVEN_TOOL_HOME = tool name: 'Maven_3.9.x', type: 'hudson.tasks.Maven$MavenInstallation'
           }
 
-          // Self-heal JDK
+          // --- JDK self-heal ---
           withEnv(["JDK_TOOL_HOME=${JDK_TOOL_HOME}"]) {
             sh '''
               set -euo pipefail
@@ -36,7 +37,7 @@ pipeline {
             '''
           }
 
-          // Self-heal Maven
+          // --- Maven self-heal ---
           withEnv(["MAVEN_TOOL_HOME=${MAVEN_TOOL_HOME}"]) {
             sh '''
               set -euo pipefail
@@ -56,7 +57,7 @@ pipeline {
             '''
           }
 
-          // Resolve actual JAVA_HOME (handles nested layouts) and wire PATH
+          // --- Resolve JAVA_HOME & PATH ---
           withEnv(["JDK_TOOL_HOME=${JDK_TOOL_HOME}"]) {
             def RESOLVED_JAVA_HOME = sh(returnStdout: true, script: '''
               set -e
@@ -83,23 +84,25 @@ pipeline {
       }
     }
 
-    stage('Cleanup') {
-      steps { deleteDir() } // Jenkins will re-checkout automatically for multibranch/withSCM
+    // CLEAN BEFORE CHECKOUT (Jenkins does an implicit checkout before stages, which we might have wiped)
+    stage('Clean workspace') {
+      steps {
+        deleteDir()
+      }
     }
 
-    stage('Checkout') {
+    stage('Checkout SCM') {
       steps {
-        // for Pipeline from SCM, Jenkins already did checkout before stages
-        echo 'SCM checkout done by Jenkins'
+        checkout scm
       }
     }
 
     stage('Locate POM') {
       steps {
         script {
-          // Find the first pom.xml in the workspace (skip .git)
           env.POM_PATH = sh(returnStdout: true, script: '''
             set -e
+            # Quote the workspace path (yours contains a space)
             f="$(find "$PWD" -type f -name pom.xml -not -path "*/.git/*" | head -n1 || true)"
             if [ -z "$f" ]; then
               echo "No pom.xml found in workspace $(pwd)" >&2
